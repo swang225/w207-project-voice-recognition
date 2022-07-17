@@ -1,272 +1,492 @@
+import os
+from urllib import request
+from tqdm import tqdm
+import ssl
+import tarfile
+import pandas as pd
+from tensorflow import keras
+from tensorflow.keras import layers
 import tensorflow as tf
-import tensorflow.compat.v1 as tfv1
-from tensorflow.python.ops import gen_audio_ops as contrib_audio
 import numpy as np
+from jiwer import wer
 
+def download_file(url, name, save_path):
+    local_filename = os.path.join(save_path, name)
+    full_url = os.path.join(url, name)
 
-def wav_to_audio(
-        wav_filename,
-):
-    samples = tf.io.read_file(wav_filename)
-    decoded = contrib_audio.decode_wav(samples, desired_channels=1)
-
-    audio = decoded.audio  # equivalent to frames converted to int16
-    sample_rate = int(decoded.sample_rate)
-
-    return audio, sample_rate
-
-
-def wav_to_spectrogram(
-        audio,
-        sample_rate,
-        feature_win_len=32,  # feature extraction audio window length in milliseconds
-        feature_win_step=20  # feature extraction window step length in milliseconds
-):
-    audio_window_samples = sample_rate * (feature_win_len / 1000)
-    audio_step_samples = sample_rate * (feature_win_step / 1000)
-
-    spectrogram = contrib_audio.audio_spectrogram(
-        audio,
-        window_size=audio_window_samples,
-        stride=audio_step_samples,
-        magnitude_squared=True
+    gcontext = ssl.SSLContext()
+    response = request.urlopen(
+        full_url,
+        context=gcontext
     )
 
-    return spectrogram, sample_rate
+    with tqdm.wrapattr(
+            open(local_filename, "wb"),
+            "write",
+            miniters=1,
+            desc=name,
+            total=getattr(response, 'length', None)
+    ) as fout:
+        for chunk in response:
+            fout.write(chunk)
 
 
-def spectrogram_to_features(
-        spectrogram,
-        sample_rate,
-        n_input=26,  # Number of MFCC features, can be determined from sample rate
+def extract(
+        file_path,
+        mode="r:bz2"
 ):
-    features = contrib_audio.mfcc(
-        spectrogram=spectrogram,
-        sample_rate=sample_rate,
-        dct_coefficient_count=n_input,
-        upper_frequency_limit=sample_rate / 2
-    )
-    features = tf.reshape(features, [-1, n_input])
-
-    return features
+    tar = tarfile.open(file_path, mode=mode)
+    tar.extractall()
+    tar.close()
 
 
-def wav_to_features(
-        wav_filename,
-        feature_win_len=32,
-        feature_win_step=20,
-        n_input=26,
-):
-    audio, sample_rate = wav_to_audio(wav_filename)
 
-    spectrogram, sample_rate = wav_to_spectrogram(
-        audio=audio,
-        sample_rate=sample_rate,
-        feature_win_len=feature_win_len,
-        feature_win_step=feature_win_step,
-    )
+def read_metadata(metadata_path, frac=1):
+    """
+    frac: is the fraction of data you want to use. 1 means 100%, or all data
+    """
+    metadata_df = pd.read_csv(metadata_path, sep="|", header=None, quoting=3)
+    metadata_df.columns = ["file_name", "transcription", "normalized_transcription"]
+    metadata_df = metadata_df[["file_name", "normalized_transcription"]]
+    metadata_df = metadata_df.sample(frac=frac).reset_index(drop=True)
 
-    features = spectrogram_to_features(
-        spectrogram=spectrogram,
-        sample_rate=sample_rate,
-        n_input=n_input,
-    )
+    return metadata_df
 
-    return features, spectrogram, audio
+
+def load_split_data(metadata_path, frac=1, split=0.9):
+    """
+    split: is the fraction of data you want to use for training. 0.9 means 90%, rest is for test
+    """
+    metadata_df = read_metadata(metadata_path, frac=frac)
+
+    split = int(len(metadata_df) * split)
+    df_train = metadata_df[:split]
+    df_val = metadata_df[split:]
+
+    return df_train, df_val
 
 
 class LabelEncoder:
 
-    cmap = {
-        ' ': 0, 'a': 1, 'b': 2, 'c': 3, 'd': 4,
-        'e': 5, 'f': 6, 'g': 7, 'h': 8, 'i': 9,
-        'j': 10, 'k': 11, 'l': 12, 'm': 13, 'n': 14,
-        'o': 15, 'p': 16, 'q': 17, 'r': 18, 's': 19,
-        't': 20, 'u': 21, 'v': 22, 'w': 23, 'x': 24,
-        'y': 25, 'z': 26, '\'': 27,
-    }
+    def __init__(self):
+        characters = [x for x in "abcdefghijklmnopqrstuvwxyz'?! "]
+        # encoder
+        self.char_to_num = keras.layers.StringLookup(vocabulary=characters, oov_token="")
+        # decoder
+        self.num_to_char = keras.layers.StringLookup(
+            vocabulary=self.char_to_num.get_vocabulary(), oov_token="", invert=True
+        )
 
-    @staticmethod
-    def to_int(c):
-        return LabelEncoder.cmap[c]
+    def encode(self, label):
+        label = tf.strings.lower(label)
+        label = tf.strings.unicode_split(label, input_encoding="UTF-8")
+        return self.char_to_num(label)
 
-    @staticmethod
-    def encode(input_string):
-        return list(map(LabelEncoder.to_int, input_string))
+    def decode(self, nums):
+        return tf.strings.reduce_join(self.num_to_char(nums))
 
 
-class OverlapWindow(tf.keras.layers.Layer):
+def wav_to_audio(filepath):
+    file = tf.io.read_file(filepath)
+
+    audio, _ = tf.audio.decode_wav(file)
+    audio = tf.squeeze(audio, axis=-1)
+
+    audio = tf.cast(audio, tf.float32)
+
+    return audio
+
+
+def audio_to_spectrogram(
+        audio,
+        frame_length,
+        frame_step,
+        fft_length,
+):
+    spectrogram = tf.signal.stft(
+        audio,
+        frame_length=frame_length,
+        frame_step=frame_step,
+        fft_length=fft_length
+    )
+
+    # 5. We only need the magnitude, which can be derived by applying tf.abs
+    spectrogram = tf.abs(spectrogram)
+    spectrogram = tf.math.pow(spectrogram, 0.5)
+
+    # 6. normalisation
+    means = tf.math.reduce_mean(spectrogram, 1, keepdims=True)
+    stddevs = tf.math.reduce_std(spectrogram, 1, keepdims=True)
+    spectrogram = (spectrogram - means) / (stddevs + 1e-10)
+
+    return spectrogram
+
+
+def wav_to_features(
+        wav_file,
+        wavs_path,
+        frame_length,
+        frame_step,
+        fft_length,
+):
+    audio = wav_to_audio(wavs_path + wav_file + ".wav")
+    spectrogram = audio_to_spectrogram(
+            audio=audio,
+            frame_length=frame_length,
+            frame_step=frame_step,
+            fft_length=fft_length,
+    )
+
+    return spectrogram
+
+
+class FeatureEncoder:
+
     def __init__(
             self,
-            window_width,
-            num_channels,
-            out_channels
+            wavs_path,
+            frame_length,
+            frame_step,
+            fft_length,
     ):
-        super(OverlapWindow, self).__init__()
-        eye = np.eye(out_channels)
-        eye = eye.reshape(
-            window_width,
-            num_channels,
-            out_channels
-        )
-        self.eye_filter = tf.constant(eye, tf.float32)
-        self.n_input = num_channels
-        self.num_channels = num_channels
-        self.window_width = window_width
+        self.wavs_path = wavs_path
+        self.frame_length = frame_length
+        self.frame_step = frame_step
+        self.fft_length = fft_length
 
-    def call(self, inputs):
-        inputs = tf.reshape([inputs], [1, -1, self.n_input])
-        inputs = tf.nn.conv1d(
-            input=inputs,
-            filters=self.eye_filter,
-            stride=1,
-            padding='SAME'
+    def features(
+            self,
+            wav_file,
+    ):
+        return wav_to_features(
+            wav_file=wav_file,
+            wavs_path=self.wavs_path,
+            frame_length=self.frame_length,
+            frame_step=self.frame_step,
+            fft_length=self.fft_length,
         )
 
-        inputs = tf.reshape(
-            inputs,
-            [1, -1, self.window_width, self.num_channels]
+
+class AudioContext:
+
+    _instance = None
+    _allowed = False
+
+    def __init__(
+            self,
+            wavs_path,
+            frame_length,
+            frame_step,
+            fft_length,
+    ):
+        if not AudioContext._allowed:
+            raise ValueError("Cannot instantiate AudioContext")
+
+        self.label_encoder = LabelEncoder()
+        self.feature_encoder = FeatureEncoder(
+            wavs_path=wavs_path,
+            frame_length=frame_length,
+            frame_step=frame_step,
+            fft_length=fft_length
         )
 
-        # in keras, one item is processed at a time
-        inputs = inputs[0]
+    @staticmethod
+    def set(
+            wavs_path,
+            frame_length,
+            frame_step,
+            fft_length,
+    ):
+        AudioContext._allowed = True
+        AudioContext._instance = AudioContext(
+            wavs_path=wavs_path,
+            frame_length=frame_length,
+            frame_step=frame_step,
+            fft_length=fft_length
+        )
+        AudioContext._allowed = False
 
-        return inputs
+    @staticmethod
+    def get():
+        if AudioContext._instance is None:
+            raise ValueError("AudioContext not set yet")
+
+        return AudioContext._instance
 
 
-def to_sparse_tuple(sequence):
-    indices = np.asarray(
-        list(zip([0]*len(sequence),
-                 range(len(sequence)))),
-        dtype=np.int64)
+def encode_single_sample(wav_file, label):
 
-    shape = np.asarray(
-        [1, len(sequence)],
-        dtype=np.int64
+    lencoder = AudioContext.get().label_encoder
+    fencoder = AudioContext.get().feature_encoder
+
+    features = fencoder.features(wav_file)
+    encoded_label = lencoder.encode(label)
+
+    return features, encoded_label
+
+
+def create_dataset(data_df, batch_size):
+    _dataset = tf.data.Dataset.from_tensor_slices(
+        (
+            list(data_df["file_name"]),
+            list(data_df["normalized_transcription"])
+        )
     )
-    return indices, sequence, shape
-
-
-def CTCLoss(y_true, y_pred):
-    sequence_length = [tf.shape(y_pred)[0].numpy()]
-    y_true = y_true[0]
-    y_pred = tf.reshape(y_pred, [y_pred.shape[0], 1, y_pred.shape[1]])
-    total_loss = tfv1.nn.ctc_loss(
-        labels=y_true,
-        inputs=y_pred,
-        sequence_length=sequence_length
+    _dataset = (
+        _dataset.map(
+            encode_single_sample,
+            num_parallel_calls=tf.data.AUTOTUNE
+        )
+        .padded_batch(batch_size)
+        .prefetch(buffer_size=tf.data.AUTOTUNE)
     )
-    return total_loss
+
+    return _dataset
 
 
-n_alphabet = 28
-n_input = 26 # number of features
-n_context = 9
-layer_1_units = 2048
-dropout_1_rate = 0.05
-layer_2_units = 2048
-dropout_2_rate = 0.05
-layer_3_units = 2048
-dropout_3_rate = 0.05
-n_cell_dim = 2048
-layer_5_units = 2048
-dropout_5_rate = 0.05
+def CTCLoss(
+        y_true,
+        y_pred
+):
+    # Compute the training-time loss value
+    batch_len = tf.cast(tf.shape(y_true)[0], dtype="int64")
+    input_length = tf.cast(tf.shape(y_pred)[1], dtype="int64")
+    label_length = tf.cast(tf.shape(y_true)[1], dtype="int64")
+
+    input_length = input_length * tf.ones(shape=(batch_len, 1), dtype="int64")
+    label_length = label_length * tf.ones(shape=(batch_len, 1), dtype="int64")
+
+    loss = keras.backend.ctc_batch_cost(y_true, y_pred, input_length, label_length)
+    return loss
 
 
-import pandas as pd
-import os
-train_file = "C:/Users/aphri/pycharm/t0001/data/deepspeech/meta/train.csv"
-dir_name = "C:/Users/aphri/pycharm/t0001/data/deepspeech/wav"
+def decode_batch_predictions(pred):
+    input_len = np.ones(pred.shape[0]) * pred.shape[1]
 
-train_df = pd.read_csv(train_file)
+    # Use greedy search. For complex tasks, you can use beam search
+    results = keras.backend.ctc_decode(
+        pred,
+        input_length=input_len,
+        greedy=True
+    )[0][0]
 
-train_x = []
-train_y = []
-count = 10
-for idx, row in train_df.iterrows():
-    if count <= 0:
-        break
-    count -= 1
-
-    features, spectrogram, audio = wav_to_features(os.path.join(dir_name, row.wav_filename), n_input=n_input)
-    seq_len = features.shape[0]
-    features = tf.pad(features, tf.constant([[0, 1000 - seq_len], [0, 0]]), "CONSTANT")
-    train_x.append(features)
-
-    label = tf.SparseTensor(*to_sparse_tuple(LabelEncoder.encode(row.transcript)))
-    train_y.append(label)
-    print(features.shape)
-    print(label.shape)
+    # Iterate over the results and get back the text
+    lencoder = AudioContext.get().label_encoder
+    res = []
+    for result in results:
+        result = lencoder.decode(result).numpy().decode("utf-8")
+        res.append(result)
+    return res
 
 
-layer_6_units = n_alphabet + 1 # 1 for ctc blank
-window_width = 2 * n_context + 1
-num_channels = n_input
-out_channels = window_width * num_channels
+class CallbackEval(keras.callbacks.Callback):
+    """Displays a batch of outputs after every epoch."""
+
+    def __init__(self, dataset, model):
+        super().__init__()
+        self.dataset = dataset
+        self.model = model
+
+    def on_epoch_end(self, epoch: int, logs=None):
+        predictions = []
+        targets = []
+        lencoder = AudioContext.get().label_encoder
+        for batch in self.dataset:
+            X, y = batch
+            batch_predictions = self.model.predict(X)
+            batch_predictions = decode_batch_predictions(batch_predictions)
+            predictions.extend(batch_predictions)
+            for label in y:
+                label = (
+                    lencoder.decode(label).numpy().decode("utf-8")\
+                )
+                targets.append(label)
+
+        wer_score = wer(targets, predictions)
+
+        print("-" * 100)
+        print(f"Word Error Rate: {wer_score:.4f}")
+        print("-" * 100)
+        for i in np.random.randint(0, len(predictions), 2):
+            print(f"Target    : {targets[i]}")
+            print(f"Prediction: {predictions[i]}")
+            print("-" * 100)
 
 
-layer_0 = OverlapWindow(
-    window_width=window_width,
-    num_channels=num_channels,
-    out_channels=out_channels
+def build_model001(
+        input_dim,
+        output_dim,
+        filter_size1=32,
+        filter_size2=32,
+        kernel_size1=[11, 41],
+        kernel_size2=[11, 21],
+        strides1=[2, 2],
+        strides2=[1, 2],
+        rnn_layers=5,
+        rnn_units=128,
+        drop1=0.5,
+        drop2=0.5,
+):
+    # Model's input
+    input_spectrogram = layers.Input(
+        (None, input_dim),
+        name="input"
+    )
+
+    # Expand the dimension to use 2D CNN.
+    x = layers.Reshape(
+        (-1, input_dim, 1),
+        name="expand_dim")(input_spectrogram)
+
+    # Convolution layer 1
+    x = layers.Conv2D(
+        filters=filter_size1,
+        kernel_size=kernel_size1,
+        strides=strides1,
+        padding="same",
+        use_bias=False,
+        name="conv_1",
+    )(x)
+    x = layers.BatchNormalization(name="conv_1_bn")(x)
+    x = layers.ReLU(name="conv_1_relu")(x)
+
+    # Convolution layer 2
+    x = layers.Conv2D(
+        filters=filter_size2,
+        kernel_size=kernel_size2,
+        strides=strides2,
+        padding="same",
+        use_bias=False,
+        name="conv_2",
+    )(x)
+    x = layers.BatchNormalization(name="conv_2_bn")(x)
+    x = layers.ReLU(name="conv_2_relu")(x)
+
+    # Reshape the resulted volume to feed the RNNs layers
+    x = layers.Reshape(
+        (-1, x.shape[-2] * x.shape[-1])
+    )(x)
+
+    # RNN layers
+    for i in range(1, rnn_layers + 1):
+        recurrent = layers.GRU(
+            units=rnn_units,
+            activation="tanh",
+            recurrent_activation="sigmoid",
+            use_bias=True,
+            return_sequences=True,
+            reset_after=True,
+            name=f"gru_{i}",
+        )
+        x = layers.Bidirectional(
+            recurrent, name=f"bidirectional_{i}", merge_mode="concat"
+        )(x)
+        if i < rnn_layers:
+            x = layers.Dropout(rate=drop1)(x)
+
+    # Dense layer
+    x = layers.Dense(
+        units=rnn_units * 2,
+        name="dense_1"
+    )(x)
+    x = layers.ReLU(name="dense_1_relu")(x)
+    x = layers.Dropout(rate=drop2)(x)
+
+    # Classification layer
+    output = layers.Dense(
+        units=output_dim + 1,
+        activation="softmax"
+    )(x)
+
+    # Model
+    model = keras.Model(
+        input_spectrogram,
+        output,
+        name="DeepSpeech_2"
+    )
+
+    # Optimizer
+    opt = keras.optimizers.Adam(learning_rate=1e-4)
+
+    # Compile the model and return
+    model.compile(optimizer=opt, loss=CTCLoss)
+
+    return model
+
+
+# params
+data_name = "LJSpeech-1.1.tar.bz2"
+data_url = "https://data.keithito.com/data/speech/"
+save_path = "C:/data"
+frame_length = 256
+frame_step = 160
+fft_length = 384
+epochs = 1
+frac = 0.3 # using 30% of the available data as input
+split = 0.9 # using 90% of the input data to train, 10% for validation
+
+wavs_path = save_path + "/LJSpeech-1.1/wavs/"
+metadata_path = save_path + "/LJSpeech-1.1/metadata.csv"
+
+# download and extract lj speech data
+download_file(
+    url=data_url,
+    name=data_name,
+    save_path=save_path
+)
+extract(os.path.join(save_path, data_name))
+
+# Read metadata file and parse it
+df_train, df_val = load_split_data(metadata_path, frac=0.3, split=0.9)
+print(f"Size of the training set: {len(df_train)}")
+print(f"Size of the training set: {len(df_val)}")
+
+
+AudioContext.set(
+    wavs_path=wavs_path,
+    frame_length=frame_length,
+    frame_step=frame_step,
+    fft_length=fft_length,
+)
+lencoder = AudioContext.get().label_encoder
+fencoder = AudioContext.get().feature_encoder
+
+meta_df = read_metadata(metadata_path)
+meta_row = meta_df.loc[5000]
+print(meta_row.file_name)
+print(meta_row.normalized_transcription)
+
+features, encoded_label = encode_single_sample(
+    wav_file=meta_row.file_name,
+    label=meta_row.normalized_transcription
+)
+decoded_label = lencoder.decode(encoded_label)
+print(features)
+print(encoded_label)
+print(decoded_label)
+
+
+batch_size = 32
+
+train_dataset = create_dataset(data_df=df_train, batch_size=batch_size)
+validation_dataset = create_dataset(data_df=df_val, batch_size=batch_size)
+
+model001 = build_model001(
+    input_dim=fft_length // 2 + 1,
+    output_dim=lencoder.char_to_num.vocabulary_size(),
+    rnn_units=512,
+)
+model001.summary(line_length=110)
+
+validation_callback = CallbackEval(
+    dataset=validation_dataset,
+    model=model001
 )
 
-
-layer_1 = tf.keras.layers.Dense(
-      units=layer_1_units,
-      use_bias=True,
-      activation="relu"
+# Train the model
+history = model001.fit(
+    train_dataset,
+    validation_data=validation_dataset,
+    epochs=epochs,
+    callbacks=[validation_callback],
 )
-
-dropout_1 = tf.keras.layers.Dropout(rate=dropout_1_rate)
-
-layer_2 = tf.keras.layers.Dense(
-      units=layer_2_units,
-      use_bias=True,
-      activation="relu"
-)
-dropout_2 = tf.keras.layers.Dropout(rate=dropout_2_rate)
-
-layer_3 = tf.keras.layers.Dense(
-      units=layer_3_units,
-      use_bias=True,
-      activation="relu"
-)
-dropout_3 = tf.keras.layers.Dropout(rate=dropout_3_rate)
-
-# RNN
-fw_cell = tf.keras.layers.LSTM(units=n_cell_dim, name='lstm_cell')
-
-layer_5 = tf.keras.layers.Dense(
-      units=layer_5_units,
-      use_bias=True,
-      activation="relu"
-)
-dropout_5 = tf.keras.layers.Dropout(rate=dropout_5_rate)
-
-layer_6 = tf.keras.layers.Dense(
-      units=layer_6_units,
-      use_bias=True,
-      activation="relu"
-)
-
-model = tf.keras.Sequential(
-    [
-        layer_0,
-        layer_1,
-        dropout_1,
-        layer_2,
-        dropout_2,
-        layer_3,
-        dropout_3,
-        fw_cell,
-        layer_5,
-        dropout_5,
-        layer_6,
-    ]
-)
-
-opt = tf.keras.optimizers.Adam(learning_rate=1e-3)
-model.compile(optimizer=opt, loss=CTCLoss)
-
-model.fit(train_x, train_y)
