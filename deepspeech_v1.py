@@ -322,7 +322,7 @@ def build_model001(
         kernel_size2=[11, 21],
         strides1=[2, 2],
         strides2=[1, 2],
-        rnn_layers=5,
+        rnn_layers=1,
         rnn_units=128,
         drop1=0.5,
         drop2=0.5,
@@ -422,7 +422,7 @@ frame_length = 256
 frame_step = 160
 fft_length = 384
 epochs = 1
-frac = 0.3 # using 30% of the available data as input
+frac = 0.1 # using 10% of the available data as input
 split = 0.9 # using 90% of the input data to train, 10% for validation
 
 wavs_path = save_path + "/LJSpeech-1.1/wavs/"
