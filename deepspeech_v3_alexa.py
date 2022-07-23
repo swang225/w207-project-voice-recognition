@@ -346,6 +346,23 @@ def accuracy(labels, predictions):
     return avg_acc
 
 
+def abs_accuracy(labels, predictions):
+
+    def _acc(l, p):
+
+        if l == p:
+            return 1
+
+        return 0
+
+    total_acc = 0
+    for l, p in zip(labels, predictions):
+        total_acc += _acc(l, p)
+
+    avg_acc = total_acc / len(labels)
+    return avg_acc
+
+
 class ModelEvaluator(keras.callbacks.Callback):
 
     def __init__(self, dataset, model):
@@ -355,11 +372,13 @@ class ModelEvaluator(keras.callbacks.Callback):
         self.history = []
 
     @staticmethod
-    def print(wer_score, res_accuracy, pred_df):
+    def print(wer_score, res_acc, abs_acc, pred_df):
         print("-" * 100)
         print(f"Word Error Rate: {wer_score:.4f}")
         print("-" * 100)
-        print(f"Accuracy: {res_accuracy:.4f}")
+        print(f"Accuracy: {res_acc:.4f}")
+        print("-" * 100)
+        print(f"Abs accuracy: {abs_acc:.4f}")
         print("-" * 100)
         print(pred_df.sample(n=5))
 
@@ -379,15 +398,16 @@ class ModelEvaluator(keras.callbacks.Callback):
                 targets.append(label)
 
         wer_score = wer(targets, predictions)
-        res_accuracy = accuracy(targets, predictions)
+        res_acc = accuracy(targets, predictions)
+        abs_acc = abs_accuracy(targets, predictions)
         pred_df = pd.DataFrame(data={"Label": targets, "predictions": predictions})
 
-        return wer_score, res_accuracy, pred_df
+        return wer_score, res_acc, abs_acc, pred_df
 
     def on_epoch_end(self, epoch: int, logs=None):
-        wer_score, res_accuracy, pred_df = self.do_prediction()
-        self.history.append((wer_score, res_accuracy, pred_df))
-        self.print(wer_score, res_accuracy, pred_df)
+        wer_score, res_acc, abs_acc, pred_df = self.do_prediction()
+        self.history.append((wer_score, res_acc, abs_acc, pred_df))
+        self.print(wer_score, res_acc, abs_acc, pred_df)
 
 
 def evaluate(model, test_dataset):
@@ -396,9 +416,9 @@ def evaluate(model, test_dataset):
         dataset=test_dataset,
         model=model
     )
-    wer_score, res_accuracy, pred_df = test_evaluator.do_prediction()
-    test_evaluator.print(wer_score, res_accuracy, pred_df)
-    return wer_score, res_accuracy, pred_df
+    wer_score, res_acc, abs_acc, pred_df = test_evaluator.do_prediction()
+    test_evaluator.print(wer_score, res_acc, abs_acc, pred_df)
+    return wer_score, res_acc, abs_acc, pred_df
 
 
 def write_pickle(data, file, ensure_exist=True):
@@ -535,7 +555,7 @@ def build_model_simple_logistic(
     # Classification layer
     output = layers.Dense(
         units=output_dim + 1,
-        activation=f"{model_name}_softmax"
+        activation="softmax"
     )(input_spectrogram)
 
     # Model
@@ -610,7 +630,7 @@ def load_model(model_name, save_path):
 frame_length = 256
 frame_step = 160
 fft_length = 384
-epochs = 5
+epochs = 10
 frac = 1
 split1 = 0.8 # using 80% of the input data to train, 20% for validation
 split2 = 0.5 # using 50% of validation for model tuning, 50% for testing
@@ -642,19 +662,19 @@ models = [
      dict(),
      build_model_simple_logistic),
     ("model001",
-     dict(rnn_layers=1, rnn_units=128),
+     dict(rnn_layers=1, rnn_units=128, drop1=0.0, drop2=0.0),
      build_model_rnn),
     ("model002",
-     dict(rnn_layers=2, rnn_units=128),
+     dict(rnn_layers=2, rnn_units=128, drop1=0.0, drop2=0.0),
      build_model_rnn),
     ("model003",
-     dict(rnn_layers=3, rnn_units=128),
+     dict(rnn_layers=3, rnn_units=128, drop1=0.0, drop2=0.0),
      build_model_rnn),
     ("model004",
-     dict(rnn_layers=4, rnn_units=128),
+     dict(rnn_layers=4, rnn_units=128, drop1=0.0, drop2=0.0),
      build_model_rnn),
     ("model005",
-     dict(rnn_layers=5, rnn_units=128),
+     dict(rnn_layers=5, rnn_units=128, drop1=0.0, drop2=0.0),
      build_model_rnn),
 ]
 
