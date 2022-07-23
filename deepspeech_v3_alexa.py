@@ -422,6 +422,7 @@ def read_pickle(file):
 def build_model_rnn(
         input_dim,
         output_dim,
+        model_name,
         filter_size1=32,
         filter_size2=32,
         kernel_size1=[11, 41],
@@ -436,13 +437,13 @@ def build_model_rnn(
     # Model's input
     input_spectrogram = layers.Input(
         (None, input_dim),
-        name="input"
+        name=f"{model_name}_input"
     )
 
     # Expand the dimension to use 2D CNN.
     x = layers.Reshape(
         (-1, input_dim, 1),
-        name="expand_dim")(input_spectrogram)
+        name=f"{model_name}_expand_dim")(input_spectrogram)
 
     # Convolution layer 1
     x = layers.Conv2D(
@@ -451,10 +452,10 @@ def build_model_rnn(
         strides=strides1,
         padding="same",
         use_bias=False,
-        name="conv_1",
+        name=f"{model_name}_conv_1",
     )(x)
-    x = layers.BatchNormalization(name="conv_1_bn")(x)
-    x = layers.ReLU(name="conv_1_relu")(x)
+    x = layers.BatchNormalization(name=f"{model_name}_conv_1_bn")(x)
+    x = layers.ReLU(name=f"{model_name}_conv_1_relu")(x)
 
     # Convolution layer 2
     x = layers.Conv2D(
@@ -463,10 +464,10 @@ def build_model_rnn(
         strides=strides2,
         padding="same",
         use_bias=False,
-        name="conv_2",
+        name=f"{model_name}_conv_2",
     )(x)
-    x = layers.BatchNormalization(name="conv_2_bn")(x)
-    x = layers.ReLU(name="conv_2_relu")(x)
+    x = layers.BatchNormalization(name=f"{model_name}_conv_2_bn")(x)
+    x = layers.ReLU(name=f"{model_name}_conv_2_relu")(x)
 
     # Reshape the resulted volume to feed the RNNs layers
     x = layers.Reshape(
@@ -482,10 +483,10 @@ def build_model_rnn(
             use_bias=True,
             return_sequences=True,
             reset_after=True,
-            name=f"gru_{i}",
+            name=f"{model_name}_gru_{i}",
         )
         x = layers.Bidirectional(
-            recurrent, name=f"bidirectional_{i}", merge_mode="concat"
+            recurrent, name=f"{model_name}_bidirectional_{i}", merge_mode="concat"
         )(x)
         if i < rnn_layers:
             x = layers.Dropout(rate=drop1)(x)
@@ -493,9 +494,9 @@ def build_model_rnn(
     # Dense layer
     x = layers.Dense(
         units=rnn_units * 2,
-        name="dense_1"
+        name=f"{model_name}_dense_1"
     )(x)
-    x = layers.ReLU(name="dense_1_relu")(x)
+    x = layers.ReLU(name=f"{model_name}_dense_1_relu")(x)
     x = layers.Dropout(rate=drop2)(x)
 
     # Classification layer
@@ -508,7 +509,7 @@ def build_model_rnn(
     model = keras.Model(
         input_spectrogram,
         output,
-        name="DeepSpeech_2"
+        name=f"{model_name}_DeepSpeech_2"
     )
 
     # Optimizer
@@ -523,24 +524,25 @@ def build_model_rnn(
 def build_model_simple_logistic(
         input_dim,
         output_dim,
+        model_name,
 ):
     # Model's input
     input_spectrogram = layers.Input(
         (None, input_dim),
-        name="input"
+        name=f"{model_name}_input"
     )
 
     # Classification layer
     output = layers.Dense(
         units=output_dim + 1,
-        activation="softmax"
+        activation=f"{model_name}_softmax"
     )(input_spectrogram)
 
     # Model
     model = keras.Model(
         input_spectrogram,
         output,
-        name="SimpleLogistic"
+        name=f"{model_name}_SimpleLogistic"
     )
 
     # Optimizer
@@ -564,6 +566,7 @@ def train_model(model_config, save_path, check_exist=True):
     model = model_builder(
         input_dim=fft_length // 2 + 1,
         output_dim=lencoder.char_to_num.vocabulary_size(),
+        model_name=model_name,
         **model_kwargs,
     )
     model.summary(line_length=110)
