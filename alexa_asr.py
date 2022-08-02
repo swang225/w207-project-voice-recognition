@@ -191,6 +191,7 @@ class LabelEncoder:
         """
         Initialize LabelEncoder objects with all values set to initial state.
         Define tokens for encoding, define out of vocabulary token.
+        reference: https://keras.io/examples/audio/ctc_asr/
         """
         characters = [x for x in "abcdefghijklmnopqrstuvwxyz'?! "]
         # encoder
@@ -219,6 +220,7 @@ def wav_to_audio(filepath):
     """
     Function to decode WAV file to a 32 bit floating point tensor (waveform)
     with values from -1.0 to 1.0 with no dimensions of size 1.
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -247,6 +249,7 @@ def audio_to_spectrogram(
     """
     Function to convert audio waveform into spectrogram via a Short Time
     Fourier Transform (STFT).
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -293,6 +296,7 @@ def wav_to_features(
     """
     Function to convert a WAV audio file into a spectrogram to be used in machine
     learning models (thus 'wav to features'.
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -455,6 +459,7 @@ class AudioContext:
 def encode_single_sample(wav_file, label):
     """
     Function to both encode label and features for a single WAV file.
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -483,6 +488,7 @@ def create_dataset(data_df, batch_size):
     """
     Function to generate a dataset for use in model training, validation or
     testing. Dataset creation is optimized using tf.data.
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -523,6 +529,7 @@ def CTCLoss(
     """
     Function to compute the training time loss value using the
     Connectionist Temporal Classification Loss, or CTC Loss algorithm.
+    reference: https://keras.io/examples/audio/ctc_asr/
 
     Params:
     -------
@@ -990,7 +997,7 @@ def build_model_ann(
     model = keras.Model(
         input_spectrogram,
         output,
-        name=f"{model_name}_DeepSpeech_2"
+        name=f"{model_name}_ANN"
     )
 
     # Optimizer
